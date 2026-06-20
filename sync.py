@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """iCloud → Google Calendar one-way sync."""
 
+import hashlib
 import json
 import logging
 import os
@@ -107,13 +108,18 @@ def parse_ical_event(vevent, url):
 
 # ── Google Calendar helpers ───────────────────────────────────────────────────
 
+def content_hash(ev):
+    key = f"{ev['summary']}|{ev['description']}|{ev['location']}|{ev['dtstart']}|{ev['dtend']}|{ev['all_day']}"
+    return hashlib.md5(key.encode()).hexdigest()
+
+
 def to_google_event(ev):
     body = {
         "summary": ev["summary"],
         "description": ev["description"] or None,
         "location": ev["location"] or None,
         "extendedProperties": {
-            "private": {"icloudUID": ev["uid"], "source": "icloud"}
+            "private": {"icloudUID": ev["uid"], "source": "icloud", "contentHash": content_hash(ev)}
         },
     }
 
@@ -140,9 +146,10 @@ def get_existing_google_events(service):
             maxResults=500,
         ).execute()
         for item in resp.get("items", []):
-            uid = item.get("extendedProperties", {}).get("private", {}).get("icloudUID")
+            private = item.get("extendedProperties", {}).get("private", {})
+            uid = private.get("icloudUID")
             if uid:
-                result[uid] = item["id"]
+                result[uid] = {"id": item["id"], "hash": private.get("contentHash")}
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
@@ -173,9 +180,12 @@ def sync():
 
         try:
             if uid in existing:
+                if existing[uid]["hash"] == content_hash(ev):
+                    skipped += 1
+                    continue
                 service.events().update(
                     calendarId=config.GOOGLE_CALENDAR_ID,
-                    eventId=existing[uid],
+                    eventId=existing[uid]["id"],
                     body=body,
                 ).execute()
                 updated += 1
@@ -188,12 +198,12 @@ def sync():
         except HttpError as e:
             log.warning("Failed to sync event '%s': %s", ev["summary"], e)
 
-    for uid, gid in existing.items():
+    for uid, meta in existing.items():
         if uid not in seen_uids:
             try:
                 service.events().delete(
                     calendarId=config.GOOGLE_CALENDAR_ID,
-                    eventId=gid,
+                    eventId=meta["id"],
                 ).execute()
                 deleted += 1
             except HttpError as e:
