@@ -58,7 +58,7 @@ def get_icloud_events():
     calendars = principal.calendars()
 
     if config.ICLOUD_CALENDAR_NAME:
-        calendars = [c for c in calendars if c.name == config.ICLOUD_CALENDAR_NAME]
+        calendars = [c for c in calendars if c.get_display_name() == config.ICLOUD_CALENDAR_NAME]
         if not calendars:
             log.error("Calendar '%s' not found in iCloud.", config.ICLOUD_CALENDAR_NAME)
             sys.exit(1)
@@ -68,8 +68,7 @@ def get_icloud_events():
 
     events = []
     for cal in calendars:
-        log.info("Fetching from iCloud calendar: %s", cal.name)
-        for event in cal.date_search(start=start, end=end, expand=True):
+        for event in cal.search(start=start, end=end, event=True, expand=True):
             vevent = event.icalendar_component
             events.append(parse_ical_event(vevent, event.url))
     return events
@@ -114,7 +113,7 @@ def to_google_event(ev):
         "description": ev["description"] or None,
         "location": ev["location"] or None,
         "extendedProperties": {
-            "private": {"icloudUID": ev["uid"]}
+            "private": {"icloudUID": ev["uid"], "source": "icloud"}
         },
     }
 
@@ -136,7 +135,7 @@ def get_existing_google_events(service):
     while True:
         resp = service.events().list(
             calendarId=config.GOOGLE_CALENDAR_ID,
-            privateExtendedProperty="icloudUID",
+            privateExtendedProperty="source=icloud",
             pageToken=page_token,
             maxResults=500,
         ).execute()

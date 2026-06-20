@@ -1,13 +1,8 @@
 services:
   sync:
     build: .
-    env_file:
-      - path: .env
-        required: false
+    env_file: .env
     environment:
-      ICLOUD_USERNAME: ""
-      ICLOUD_APP_PASSWORD: ""
-      ICLOUD_CALENDAR_NAME: ""
       GOOGLE_CALENDAR_ID: primary
       SYNC_PAST_DAYS: 30
       SYNC_FUTURE_DAYS: 365
@@ -15,3 +10,8 @@ services:
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
