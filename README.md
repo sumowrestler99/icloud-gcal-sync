@@ -35,9 +35,12 @@ cd icloud-gcal-sync
 
 1. Go to [console.cloud.google.com](https://console.cloud.google.com) and create a project
 2. Enable the **Google Calendar API**
-3. Go to **APIs & Services → Credentials → Create Credentials → OAuth 2.0 Client ID**
-4. Choose **Desktop app**, then download the JSON file
-5. Place it in the `data/` directory and rename it `credentials.json`
+3. Go to **APIs & Services → OAuth consent screen**
+   - Set publishing status to **Testing**
+   - Under **Audience**, add your Google account email as a test user
+4. Go to **APIs & Services → Credentials → Create Credentials → OAuth 2.0 Client ID**
+5. Choose **Desktop app**, then download the JSON file
+6. Place it in the `data/` directory and rename it `credentials.json`
 
 ```bash
 mkdir data
