@@ -94,8 +94,14 @@ def parse_ical_event(vevent, url):
     if dtend and isinstance(dtend, datetime) and dtend.tzinfo is None:
         dtend = dtend.replace(tzinfo=timezone.utc)
 
+    # Expanded recurring occurrences share a UID; RECURRENCE-ID tells them apart.
+    key = uid
+    if uid and vevent.get("RECURRENCE-ID"):
+        key = f"{uid}|{vevent.get('RECURRENCE-ID').dt.isoformat()}"
+
     return {
         "uid": uid,
+        "key": key,
         "summary": summary,
         "description": description,
         "location": location,
@@ -108,6 +114,14 @@ def parse_ical_event(vevent, url):
 
 # ── Google Calendar helpers ───────────────────────────────────────────────────
 
+def add_existing(result, key, event_id, hash_):
+    """Record a synced event; extra events with the same key are kept as duplicates to delete."""
+    if key in result:
+        result[key]["duplicates"].append(event_id)
+    else:
+        result[key] = {"id": event_id, "hash": hash_, "duplicates": []}
+
+
 def content_hash(ev):
     key = f"{ev['summary']}|{ev['description']}|{ev['location']}|{ev['dtstart']}|{ev['dtend']}|{ev['all_day']}"
     return hashlib.md5(key.encode()).hexdigest()
@@ -119,7 +133,7 @@ def to_google_event(ev):
         "description": ev["description"] or None,
         "location": ev["location"] or None,
         "extendedProperties": {
-            "private": {"icloudUID": ev["uid"], "source": "icloud", "contentHash": content_hash(ev)}
+            "private": {"icloudUID": ev["key"], "source": "icloud", "contentHash": content_hash(ev)}
         },
     }
 
@@ -149,7 +163,7 @@ def get_existing_google_events(service):
             private = item.get("extendedProperties", {}).get("private", {})
             uid = private.get("icloudUID")
             if uid:
-                result[uid] = {"id": item["id"], "hash": private.get("contentHash")}
+                add_existing(result, uid, item["id"], private.get("contentHash"))
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
@@ -171,7 +185,7 @@ def sync():
     seen_uids = set()
 
     for ev in icloud_events:
-        uid = ev["uid"]
+        uid = ev["key"]
         if not uid:
             skipped += 1
             continue
@@ -199,15 +213,16 @@ def sync():
             log.warning("Failed to sync event '%s': %s", ev["summary"], e)
 
     for uid, meta in existing.items():
-        if uid not in seen_uids:
+        stale = meta["duplicates"] + ([meta["id"]] if uid not in seen_uids else [])
+        for event_id in stale:
             try:
                 service.events().delete(
                     calendarId=config.GOOGLE_CALENDAR_ID,
-                    eventId=meta["id"],
+                    eventId=event_id,
                 ).execute()
                 deleted += 1
             except HttpError as e:
-                log.warning("Failed to delete event %s: %s", gid, e)
+                log.warning("Failed to delete event %s: %s", uid, e)
 
     log.info("Done. Created: %d, Updated: %d, Deleted: %d, Skipped: %d",
              created, updated, deleted, skipped)
