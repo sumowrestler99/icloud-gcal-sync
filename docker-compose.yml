@@ -3,7 +3,6 @@ services:
     build: .
     env_file: .env
     environment:
-      GOOGLE_CALENDAR_ID: primary
       SYNC_PAST_DAYS: 30
       SYNC_FUTURE_DAYS: 365
       SYNC_INTERVAL_MINUTES: 15

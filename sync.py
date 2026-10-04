@@ -49,21 +49,21 @@ def get_google_service():
 
 # ── iCloud CalDAV ─────────────────────────────────────────────────────────────
 
-def get_icloud_events():
+def get_icloud_calendars():
+    """Return {display name: calendar} for iCloud calendars that hold events (skips reminder lists)."""
     client = caldav.DAVClient(
         url="https://caldav.icloud.com",
         username=config.ICLOUD_USERNAME,
         password=config.ICLOUD_APP_PASSWORD,
     )
-    principal = client.principal()
-    calendars = principal.calendars()
+    return {
+        c.get_display_name(): c
+        for c in client.principal().calendars()
+        if "VEVENT" in c.get_supported_components()
+    }
 
-    if config.ICLOUD_CALENDAR_NAME:
-        calendars = [c for c in calendars if c.get_display_name() == config.ICLOUD_CALENDAR_NAME]
-        if not calendars:
-            log.error("Calendar '%s' not found in iCloud.", config.ICLOUD_CALENDAR_NAME)
-            sys.exit(1)
 
+def get_icloud_events(calendars):
     start = datetime.now(timezone.utc) - timedelta(days=config.SYNC_PAST_DAYS)
     end = datetime.now(timezone.utc) + timedelta(days=config.SYNC_FUTURE_DAYS)
 
@@ -149,12 +149,12 @@ def to_google_event(ev):
     return body
 
 
-def get_existing_google_events(service):
+def get_existing_google_events(service, calendar_id):
     result = {}
     page_token = None
     while True:
         resp = service.events().list(
-            calendarId=config.GOOGLE_CALENDAR_ID,
+            calendarId=calendar_id,
             privateExtendedProperty="source=icloud",
             pageToken=page_token,
             maxResults=500,
@@ -170,16 +170,105 @@ def get_existing_google_events(service):
     return result
 
 
+def get_google_calendars(service):
+    calendars = []
+    page_token = None
+    while True:
+        resp = service.calendarList().list(pageToken=page_token).execute()
+        calendars.extend(resp.get("items", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return calendars
+
+
+def find_google_calendar(google_calendars, target):
+    """Return the calendar ID for target, a calendar ID or name, or None if no such calendar exists."""
+    for cal in google_calendars:
+        if (target == "primary" and cal.get("primary")) or target in (cal["id"], cal.get("summary")):
+            return cal["id"]
+    if target == "primary" or "@" in target:
+        return target
+    return None
+
+
+def create_google_calendar(service, google_calendars, target):
+    log.info("Creating Google calendar '%s'", target)
+    created = service.calendars().insert(body={"summary": target}).execute()
+    google_calendars.append(created)
+    return created["id"]
+
+
+def remove_untargeted_events(service, google_calendars, target_ids):
+    """Delete synced events from owned calendars that are no longer sync targets (e.g. after remapping)."""
+    for cal in google_calendars:
+        if cal["id"] in target_ids or cal.get("accessRole") != "owner":
+            continue
+        existing = get_existing_google_events(service, cal["id"])
+        event_ids = [eid for meta in existing.values() for eid in [meta["id"], *meta["duplicates"]]]
+        if not event_ids:
+            continue
+        log.info("[%s] No longer a sync target, removing %d synced events", cal["id"], len(event_ids))
+        for event_id in event_ids:
+            try:
+                service.events().delete(calendarId=cal["id"], eventId=event_id).execute()
+            except HttpError as e:
+                log.warning("Failed to delete event %s: %s", event_id, e)
+
+
 # ── Sync ──────────────────────────────────────────────────────────────────────
+
+def get_calendar_targets(icloud_names):
+    """Return {google target: [iCloud calendar names]}."""
+    if not config.CALENDAR_MAP:
+        return {name: [name] for name in icloud_names}
+
+    # Group by target so iCloud calendars sharing a Google calendar sync in one pass;
+    # syncing them separately would delete each other's events.
+    targets = {}
+    for entry in config.CALENDAR_MAP.split(","):
+        if not entry.strip():
+            continue
+        icloud_name, _, google_target = entry.partition("=")
+        icloud_name = icloud_name.strip()
+        google_target = google_target.strip() or icloud_name
+        targets.setdefault(google_target, []).append(icloud_name)
+    return targets
+
 
 def sync():
     log.info("Starting iCloud → Google Calendar sync")
 
     service = get_google_service()
-    icloud_events = get_icloud_events()
-    existing = get_existing_google_events(service)
+    icloud_calendars = get_icloud_calendars()
+    targets = get_calendar_targets(icloud_calendars)
 
-    log.info("Found %d iCloud events, %d already synced to Google", len(icloud_events), len(existing))
+    missing = [n for names in targets.values() for n in names if n not in icloud_calendars]
+    if missing:
+        # Bail out rather than sync an empty set, which would delete everything in Google.
+        log.error("Calendar(s) not found in iCloud: %s", ", ".join(missing))
+        sys.exit(1)
+
+    google_calendars = get_google_calendars(service)
+    target_ids = set()
+    for target, icloud_names in targets.items():
+        icloud_events = get_icloud_events([icloud_calendars[n] for n in icloud_names])
+        calendar_id = find_google_calendar(google_calendars, target)
+        if not calendar_id:
+            if not icloud_events:
+                continue  # don't create Google calendars for empty iCloud calendars
+            calendar_id = create_google_calendar(service, google_calendars, target)
+        target_ids.add(calendar_id)
+        sync_calendar(service, calendar_id, icloud_events)
+
+    remove_untargeted_events(service, google_calendars, target_ids)
+
+
+def sync_calendar(service, calendar_id, icloud_events):
+    existing = get_existing_google_events(service, calendar_id)
+
+    log.info("[%s] Found %d iCloud events, %d already synced to Google",
+             calendar_id, len(icloud_events), len(existing))
 
     created = updated = skipped = deleted = 0
     seen_uids = set()
@@ -198,14 +287,14 @@ def sync():
                     skipped += 1
                     continue
                 service.events().update(
-                    calendarId=config.GOOGLE_CALENDAR_ID,
+                    calendarId=calendar_id,
                     eventId=existing[uid]["id"],
                     body=body,
                 ).execute()
                 updated += 1
             else:
                 service.events().insert(
-                    calendarId=config.GOOGLE_CALENDAR_ID,
+                    calendarId=calendar_id,
                     body=body,
                 ).execute()
                 created += 1
@@ -217,15 +306,15 @@ def sync():
         for event_id in stale:
             try:
                 service.events().delete(
-                    calendarId=config.GOOGLE_CALENDAR_ID,
+                    calendarId=calendar_id,
                     eventId=event_id,
                 ).execute()
                 deleted += 1
             except HttpError as e:
                 log.warning("Failed to delete event %s: %s", uid, e)
 
-    log.info("Done. Created: %d, Updated: %d, Deleted: %d, Skipped: %d",
-             created, updated, deleted, skipped)
+    log.info("[%s] Done. Created: %d, Updated: %d, Deleted: %d, Skipped: %d",
+             calendar_id, created, updated, deleted, skipped)
 
 
 if __name__ == "__main__":

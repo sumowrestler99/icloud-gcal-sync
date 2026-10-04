@@ -67,7 +67,6 @@ Edit `.env` with your credentials:
 ```env
 ICLOUD_USERNAME=you@icloud.com
 ICLOUD_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
-ICLOUD_CALENDAR_NAME=
 ```
 
 ### 6. Deploy to Synology
@@ -94,11 +93,26 @@ Credentials go in `.env`. Non-sensitive settings can also be overridden in the `
 |---|---|---|
 | `ICLOUD_USERNAME` | required | Apple ID email |
 | `ICLOUD_APP_PASSWORD` | required | App-specific password |
-| `ICLOUD_CALENDAR_NAME` | _(all)_ | Specific calendar name, or blank to sync all |
-| `GOOGLE_CALENDAR_ID` | `primary` | Target Google Calendar |
+| `CALENDAR_MAP` | _(all, same names)_ | Which iCloud calendars sync to which Google calendars. See below |
 | `SYNC_PAST_DAYS` | `30` | How many days back to sync |
 | `SYNC_FUTURE_DAYS` | `365` | How many days forward to sync |
 | `SYNC_INTERVAL_MINUTES` | `15` | How often to sync |
+
+### Calendar mapping
+
+By default, every iCloud calendar syncs to a Google calendar with the same name, which is created if it doesn't exist.
+
+To choose calendars or targets, set `CALENDAR_MAP` to comma-separated `iCloud name=Google calendar` pairs. Only the listed iCloud calendars sync:
+
+```
+CALENDAR_MAP=Home=primary,Work=Work (iCloud),Family
+```
+
+- The Google side can be `primary`, a calendar ID (contains `@`), or a calendar name. A name that doesn't exist yet is created on the first sync.
+- An entry without `=` (like `Family` above) uses the same name in Google.
+- Several iCloud calendars can map to the same Google calendar.
+- Calendar names can't contain commas or `=`.
+- When a Google calendar you own stops being a target (e.g. after changing the map), events this tool synced into it are removed. Other events in it are never touched.
 
 ---
 
